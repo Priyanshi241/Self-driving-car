@@ -1,26 +1,75 @@
 import numpy as np
-import cv2
-import picamera
-import io
-import time
-import RPi.GPIO as GPIO
+import matplotlib.pyplot as plt
+from keras.models import load_model
+import math
+import argparse
+from google.colab.patches import cv2_imshow
+#import RPi.GPIO as GPIO
 
 # Define GPIO pin numbers
-ENA=17
-IN1=27
-IN2=22
+# TRIG = 17
+# ECHO = 27
+# led = 22
+# m11 = 16
+# m12 = 12
+# m21 = 21
+# m22 = 20
 
 # GPIO setup
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(ENA, GPIO.OUT)
-GPIO.setup(IN1, GPIO.OUT)
-GPIO.setup(IN2, GPIO.OUT)
+# GPIO.setwarnings(False)
+# GPIO.setmode(GPIO.BCM)
+# GPIO.setup(TRIG, GPIO.OUT)
+# GPIO.setup(ECHO, GPIO.IN)
+# GPIO.setup(led, GPIO.OUT)
+# GPIO.setup(m11, GPIO.OUT)
+# GPIO.setup(m12, GPIO.OUT)
+# GPIO.setup(m21, GPIO.OUT)
+# GPIO.setup(m22, GPIO.OUT)
 
-
-# Load traffic light cascade classifier
+model = load_model('/content/full_CNN_model.h5')
 cascadePath = r'/content/trafficLightCascade.xml'
 cascade = cv2.CascadeClassifier(cascadePath)
+
+class Lanes():
+    def __init__(self):
+        self.recent_fit = []
+        self.avg_fit = []
+
+def slope(vx1, vx2, vy1, vy2):
+    m = float(vy2 - vy1) / float(vx2 - vx1)
+    theta1 = math.atan(m)
+    return theta1 * (180 / np.pi)
+
+def road_lines(image, lanes):
+    small_img = cv2.resize(image, (160, 80))
+    small_img = np.array(small_img)
+    small_img = small_img[None,:,:,:]
+
+    prediction = model.predict(small_img)[0] * 255
+    lanes.recent_fit.append(prediction)
+    if len(lanes.recent_fit) > 5:
+        lanes.recent_fit = lanes.recent_fit[1:]
+    lanes.avg_fit = np.mean(np.array([i for i in lanes.recent_fit]), axis=0)
+
+    lane_center = np.argmax(lanes.avg_fit, axis=1)
+    center_position = len(lane_center) // 2
+    lane_position = np.argmax(lane_center)
+
+    distance_from_center = lane_position - center_position
+
+    blanks = np.zeros_like(lanes.avg_fit).astype(np.uint8)
+    lane_drawn = np.dstack((blanks, lanes.avg_fit, blanks))
+    lane_image = cv2.resize(lane_drawn, (image.shape[1], image.shape[0]))
+    lane_image = lane_image.astype(image.dtype)
+
+    result = cv2.addWeighted(image, 1, lane_image, 1, 0)
+
+    if distance_from_center > 10:
+        print("Turn right")
+    elif distance_from_center < -10:
+        print("Turn left")
+
+    return result
 
 
 def identifyDominantColor(roi):
@@ -39,8 +88,8 @@ def identifyDominantColor(roi):
     else:
         return 'unknown'
 
+
 def detect_traffic_light(frame):
-    # Function to detect traffic light and return signal
     red_light_detected = False
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     traffic_lights = cascade.detectMultiScale(gray, 1.3, 5)
@@ -52,101 +101,79 @@ def detect_traffic_light(frame):
             return True
     return False
 
+# def stop():
+#   print('stop')
+#   GPIO.output(m11, 0)
+#   GPIO.output(m12, 0)
+#   GPIO.output(m21, 0)
+#   GPIO.output(m22, 0)
+
+# def forward():
+#   GPIO.output(m11, 0)
+#   GPIO.output(m12, 1)
+#   GPIO.output(m21, 1)
+#   GPIO.output(m22, 0)
+#   print('Forward')
+
+
 def process_video_with_object_detection(frame):
-    # Initialize the list of class labels MobileNet SSD was trained to detect
-    CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-               "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
+    CLASSES = ["boat","bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
                "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-               "sofa", "train", "tvmonitor", "box", "keys", "bottle","black box"]
+               "sofa", "train", "tvmonitor", "box", "keys", "bottle"]
 
-    # Load MobileNet SSD model
-    net = cv2.dnn.readNetFromCaffe('/content/MobileNetSSD_deploy.prototxt.txt', '/content/MobileNetSSD_deploy.caffemodel')
+    print("[INFO] loading model...")
+    net = cv2.dnn.readNetFromCaffe('/content/MobileNetSSD_deploy.prototxt.txt', '/content/MobileNetSSD_deploy (2).caffemodel')
 
-    # Grab the frame dimensions and convert it to a blob
     (h, w) = frame.shape[:2]
     blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
 
-    # Pass the blob through the network and obtain the detections and predictions
     net.setInput(blob)
     detections = net.forward()
 
-    # Loop over the detections
     for i in np.arange(0, detections.shape[2]):
-        # Extract the confidence (i.e., probability) associated with the prediction
         confidence = detections[0, 0, i, 2]
 
-        # Filter out weak detections by ensuring the confidence is greater than the minimum confidence
         if confidence > 0.2:
-            # Extract the index of the class label from the detections
             idx = int(detections[0, 0, i, 1])
 
-            # Compute the (x, y)-coordinates of the bounding box for the object
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
 
-            # Draw the bounding box around the detected object
             cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
 
-            # Draw the class label and confidence
             label = "{}: {:.2f}%".format(CLASSES[idx], confidence * 100)
             y = startY - 15 if startY - 15 > 15 else startY + 15
             cv2.putText(frame, label, (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    
-    # If object detected, return True, else return False
-    return True if detections.shape[2] > 0 else False
 
-
-def stop():
-  GPIO.output(m11, 0)
-  GPIO.output(m12, 0)
-  GPIO.output(m21, 0)
-  GPIO.output(m22, 0)
-
-def forward():
-  GPIO.output(ENA, GPIO.HIGH)
-  GPIO.output(IN1, GPIO.HIGH)
-  GPIO.output(IN2, GPIO.LOW)
-
-def process_video(video_data):
+def process_video(video_path):
     try:
-        stream = io.BytesIO(video_data)
-        cap = cv2.VideoCapture(stream)
+        cap = cv2.VideoCapture(video_path)
         lanes = Lanes()
 
-        while True:
-            # Capture the first 10 seconds of video
-            start_time = time.time()
-            while time.time() - start_time < 10:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-                # Detect traffic light
-                red_light_detected = detect_traffic_light(frame)
+            red_light_detected = detect_traffic_light(frame)
+            object_detected = process_video_with_object_detection(frame)
+            if  object_detected and red_light_detected:
+                print("Stop the car: Red traffic light detected and object detected in the path of the car.")
+                # stop()
+            elif red_light_detected:
+                print("Stop the car: Red traffic light detected.")
+                # stop()
+            elif object_detected:
+                print("Object detected in the path of the car. Taking necessary action...")
+                # stop()
+            else:
+                print("No red traffic light detected and no object in the path of the car. Checking for lane detection... ")
+                #print("If lane detection is not working than uncomment forward and comment everything else  ")
+                # forward
+                lane_detected_frame = road_lines(frame, lanes)
+                cv2_imshow(lane_detected_frame)
 
-                # Object detection
-                object_detected = process_video_with_object_detection(frame)
-
-                # Lane detection
-                if  object_detected and red_light_detected:
-                  stop()
-                elif red_light_detected:
-                  stop()
-                elif object_detected:
-                  stop()
-                else:
-                  forward()
-
-                # Detect Final light
-                green_light_detected = detect_traffic_light(frame)
-                if green_light_detected:
-                    stop()
-
-                # Display the original frame
-                cv2.imshow(frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-
+            cv2_imshow(frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
@@ -155,13 +182,7 @@ def process_video(video_data):
     except Exception as e:
         print("An error occurred:", e)
 
-if __name__ == '__main__':
-    # Capture video from Raspberry Pi camera
-    with picamera.PiCamera() as camera:
-        camera.resolution = (1296,972)
-        while True:
-            camera.start_recording('video.h264')
-            camera.wait_recording(10)  # Record for 10 seconds (you can adjust this duration)
-            camera.stop_recording()
 
-            time.sleep(2)
+if __name__ == '__main__':
+    video_path = input("Enter the path of the video: ")
+    process_video(video_path)
